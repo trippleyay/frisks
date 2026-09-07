@@ -1,5 +1,4 @@
-# Render Blueprint for Frisks -- see the README's deployment runbook.
-# region: singapore is required (Binance's Options API geo-blocks other regions).
+# Render Blueprint for Frisks
 # FRISKS_PEER_HEALTH_URL values assume the service names below; update on rename.
 # PORT is injected by Render automatically; do not declare it in envVars.
 
