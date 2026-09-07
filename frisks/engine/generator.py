@@ -57,6 +57,18 @@ BUG FIXES (post-MVP):
    across exactly two expiries; numerically confirmed: near-zero net
    delta AND near-zero net gamma relative to gross exposure) and such
    candidates are excluded from ranking entirely in `generate_candidates`.
+
+3. The requested (primary) expiry was being treated as optional rather
+   than required: both `generate_all_templates` and
+   `branch_and_bound_search` could return a fully-formed candidate built
+   entirely from the *additional* expiries fetched only to support
+   calendar/diagonal structures, containing zero legs at the expiry the
+   caller actually asked for. Fixed: `primary_expiry_ms` is now a required
+   parameter threaded through generation, enforced structurally (calendar
+   templates only ever pair the primary expiry with one other; free-form
+   search prunes any branch that would exhaust its expiry budget without
+   the primary expiry included) and with a hard filter as a final
+   safety net in `generate_candidates`.
 """
 from __future__ import annotations
 
@@ -219,10 +231,26 @@ def branch_and_bound_search(
     direction: Direction,
     max_loss_budget: float,
     constraints: Constraints,
+    primary_expiry_ms: int,
     max_nodes: int = 15000,
 ) -> GenerationResult:
-    """Free-form n-leg search, up to constraints.max_legs, across at most
-    constraints.max_expiries distinct expiries."""
+    """
+    Free-form n-leg search, up to constraints.max_legs, across at most
+    constraints.max_expiries distinct expiries.
+
+    BUG FIX: the requested (primary) expiry is now a hard constraint --
+    every completed candidate must include at least one leg at
+    `primary_expiry_ms`. Previously only the *count* of distinct expiries
+    was capped (rule 6); nothing required one of them to be the expiry
+    the caller actually asked for, so free-form search could return a
+    fully-formed 2-expiry candidate built entirely from later expiries
+    fetched only to support calendar structures. Enforced two ways:
+    (1) an efficiency prune -- once a branch is about to exhaust its
+    expiry budget without ever having included the primary expiry, that
+    extension is a guaranteed dead end and is skipped; (2) a hard gate at
+    candidate-completion time, so nothing without a primary-expiry leg
+    ever enters `results`.
+    """
 
     # Order candidate legs by |strike - spot| ascending within each expiry,
     # then interleave expiries — near-the-money first, per the scaling note above.
@@ -244,7 +272,7 @@ def branch_and_bound_search(
             return
         stats["nodes"] += 1
 
-        if len(legs) >= 2:
+        if len(legs) >= 2 and primary_expiry_ms in used_expiries:
             sig = signature(legs)
             if sig not in seen_signatures:
                 seen_signatures.add(sig)
@@ -267,6 +295,14 @@ def branch_and_bound_search(
             # Rule 6: expiry-count prune.
             prospective_expiries = used_expiries | {expiry_ms}
             if len(prospective_expiries) > constraints.max_expiries:
+                continue
+
+            # Requested-expiry prune: if this extension would exhaust the
+            # expiry budget without the primary expiry ever having been
+            # included, every completion down this branch is a guaranteed
+            # dead end (rule 6 forbids introducing a further expiry) --
+            # skip it rather than exploring it just to discard it later.
+            if len(prospective_expiries) == constraints.max_expiries and primary_expiry_ms not in prospective_expiries:
                 continue
 
             for side in (OrderSide.BUY, OrderSide.SELL):
@@ -305,35 +341,58 @@ def branch_and_bound_search(
     )
 
 
+@dataclass
+class ExclusionStats:
+    """
+    Diagnostic counters for why otherwise-structurally-valid candidates
+    were excluded from the final ranked pool, broken out by *reason* --
+    added to support the feasibility-aware re-querying feature (a caller
+    whose budget was the binding constraint should get a different signal
+    than one whose direction was simply unsatisfiable by the liquid
+    chain). Distinct from `candidates_excluded_illiquid` (computed
+    upstream in the data layer, before candidates are even generated).
+    """
+
+    budget_excluded: int = 0
+    direction_excluded: int = 0
+    box_spread_excluded: int = 0
+
+
 def generate_candidates(
     quotes_by_expiry: dict[int, list[MarketQuote]],
     underlying_price: float,
     direction: Direction,
     max_loss_budget: float,
     constraints: Constraints,
+    primary_expiry_ms: int,
     max_nodes: int = 15000,
-) -> tuple[list[Candidate], GenerationResult]:
+) -> tuple[list[Candidate], GenerationResult, ExclusionStats]:
     """
     Merge template-generated and free-form-searched candidates. Templates
-    are also subject to the budget, direction-consistency, and
-    box-spread-shape checks so a template that happens to bust the user's
-    constraints (or misrepresent a near-riskless-by-model-construction
-    structure as a genuinely risk-bounded one) doesn't leak through
-    untested.
+    are also subject to the budget, direction-consistency, box-spread-
+    shape, and requested-expiry checks so a template that happens to bust
+    the user's constraints (or omit the expiry they actually asked for)
+    doesn't leak through untested.
     """
-    template_candidates = generate_all_templates(quotes_by_expiry, constraints.max_expiries)
+    template_candidates = generate_all_templates(quotes_by_expiry, constraints.max_expiries, primary_expiry_ms)
     bnb_result = branch_and_bound_search(
-        quotes_by_expiry, underlying_price, direction, max_loss_budget, constraints, max_nodes
+        quotes_by_expiry, underlying_price, direction, max_loss_budget, constraints, primary_expiry_ms, max_nodes
     )
 
     valid: list[Candidate] = []
     seen: set[tuple] = set()
-    box_spread_excluded = 0
+    stats = ExclusionStats()
 
     def sig(c: Candidate) -> tuple:
         return tuple(sorted((leg.symbol, leg.side.value, leg.quantity) for leg in c.legs))
 
     for candidate in itertools.chain(template_candidates, bnb_result.candidates):
+        if primary_expiry_ms not in candidate.expiries:
+            # Hard requirement: every returned candidate must include at
+            # least one leg at the requested expiry. Defense in depth --
+            # both generators above already enforce this structurally, but
+            # this guarantees it regardless of source.
+            continue
         if len(candidate.legs) > constraints.max_legs:
             continue
         if len(candidate.expiries) > constraints.max_expiries:
@@ -342,13 +401,16 @@ def generate_candidates(
             continue  # unbounded upside risk, never a valid completed candidate
         worst = _bounded_worst_case_loss(candidate.legs, candidate.entry_cost)
         if worst is None or worst > max_loss_budget:
+            stats.budget_excluded += 1
             continue
         if candidate.entry_cost > max_loss_budget:
+            stats.budget_excluded += 1
             continue
         if _direction_contradicts(candidate, direction):
+            stats.direction_excluded += 1
             continue
         if is_box_spread_shaped(candidate):
-            box_spread_excluded += 1
+            stats.box_spread_excluded += 1
             continue
         s = sig(candidate)
         if s in seen:
@@ -356,7 +418,9 @@ def generate_candidates(
         seen.add(s)
         valid.append(candidate)
 
-    if box_spread_excluded:
-        logger.info("generate_candidates: excluded %s box-spread-shaped candidates", box_spread_excluded)
+    if stats.box_spread_excluded:
+        logger.info("generate_candidates: excluded %s box-spread-shaped candidates", stats.box_spread_excluded)
+    if stats.budget_excluded:
+        logger.info("generate_candidates: excluded %s candidates for exceeding max_loss budget", stats.budget_excluded)
 
-    return valid, bnb_result
+    return valid, bnb_result, stats

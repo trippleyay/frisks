@@ -2,9 +2,16 @@
 Exercises StrategyHunterService end to end (normalize -> fetch -> generate
 -> score -> assemble response) against a fake MarketDataService built from
 synthetic quotes, so it runs without httpx/network and without a real LLM
-key. The LLM client is not invoked by handle_structured_request at all
-(by design — see service.py), so this validates the engine path the
-locked /v1/strategies contract actually depends on.
+key.
+
+Historical note (no longer accurate, kept for context): earlier revisions
+of this docstring said "the LLM client is not invoked by
+handle_structured_request at all" -- that was true before the
+LLM-as-orchestrator build. It now IS invoked (feasibility-aware
+re-querying and self-critique both live inside handle_structured_request,
+see service.py), but both are enrichments that fail soft: FakeLLMClient
+below returns deterministic, injectable fake responses so tests can
+verify both trigger logic and non-triggering just as reliably as before.
 """
 from __future__ import annotations
 
@@ -44,8 +51,31 @@ class FakeMarketDataService:
 
 
 class FakeLLMClient:
-    def close(self):
+    """
+    Deterministic, injectable fake for the two orchestrator LLM calls.
+    Records every call it receives (request_summary, json-string payload)
+    so tests can assert on WHETHER a call happened (trigger logic) without
+    needing a real provider. `self_critique_response` defaults to `{}`
+    (no caveats added -- the common case); override per-test to simulate
+    the LLM choosing to add one.
+    """
+
+    def __init__(self, self_critique_response: dict | None = None, budget_note_response: str = "TEST_BUDGET_NOTE"):
+        self.self_critique_response = self_critique_response if self_critique_response is not None else {}
+        self.budget_note_response = budget_note_response
+        self.self_critique_calls: list[tuple[str, str]] = []
+        self.synthesize_budget_note_calls: list[tuple[str, str]] = []
+
+    def close(self) -> None:
         pass
+
+    def self_critique(self, request_summary: str, strategies_json: str) -> dict:
+        self.self_critique_calls.append((request_summary, strategies_json))
+        return self.self_critique_response
+
+    def synthesize_budget_note(self, request_summary: str, results_json: str) -> str:
+        self.synthesize_budget_note_calls.append((request_summary, results_json))
+        return self.budget_note_response
 
 
 def _service_with_chain():

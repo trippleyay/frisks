@@ -10,12 +10,13 @@ def _setup(objective: Objective, target_cost=None):
     expiry = near_expiry_ms(30)
     strikes = [80, 85, 90, 95, 100, 105, 110, 115, 120]
     quotes = build_chain("BTCUSDT", 100.0, strikes, expiry)
-    candidates, _ = generate_candidates(
+    candidates, _, _excl_stats = generate_candidates(
         quotes_by_expiry={expiry: quotes},
         underlying_price=100.0,
         direction=Direction.NEUTRAL,
         max_loss_budget=2000.0,
         constraints=Constraints(max_legs=4, max_expiries=1),
+        primary_expiry_ms=expiry,
         max_nodes=6000,
     )
     payoff_models = [(c, build_payoff_model(c, 100.0, 0.0, 200, 6.0)) for c in candidates]

@@ -30,12 +30,13 @@ def test_covered_call_spread_is_bounded():
 
 def test_generate_candidates_respects_max_loss_budget():
     quotes, expiry = _chain()
-    candidates, _stats = generate_candidates(
+    candidates, _stats, _excl_stats = generate_candidates(
         quotes_by_expiry={expiry: quotes},
         underlying_price=100.0,
         direction=Direction.NEUTRAL,
         max_loss_budget=50.0,
         constraints=Constraints(max_legs=4, max_expiries=2),
+        primary_expiry_ms=expiry,
         max_nodes=5000,
     )
     for c in candidates:
@@ -44,12 +45,13 @@ def test_generate_candidates_respects_max_loss_budget():
 
 def test_generate_candidates_respects_max_legs():
     quotes, expiry = _chain()
-    candidates, _stats = generate_candidates(
+    candidates, _stats, _excl_stats = generate_candidates(
         quotes_by_expiry={expiry: quotes},
         underlying_price=100.0,
         direction=Direction.NEUTRAL,
         max_loss_budget=10_000.0,
         constraints=Constraints(max_legs=2, max_expiries=1),
+        primary_expiry_ms=expiry,
         max_nodes=5000,
     )
     assert candidates
@@ -60,12 +62,13 @@ def test_generate_candidates_respects_max_legs():
 
 def test_no_candidate_has_redundant_inverse_legs():
     quotes, expiry = _chain()
-    candidates, _stats = generate_candidates(
+    candidates, _stats, _excl_stats = generate_candidates(
         quotes_by_expiry={expiry: quotes},
         underlying_price=100.0,
         direction=Direction.NEUTRAL,
         max_loss_budget=10_000.0,
         constraints=Constraints(max_legs=4, max_expiries=2),
+        primary_expiry_ms=expiry,
         max_nodes=5000,
     )
     for c in candidates:
@@ -73,3 +76,34 @@ def test_no_candidate_has_redundant_inverse_legs():
         for symbol, side, qty in symbols_sides:
             opposite = (symbol, OrderSide.SELL if side is OrderSide.BUY else OrderSide.BUY, qty)
             assert symbols_sides.count(opposite) == 0 or symbols_sides.count((symbol, side, qty)) == 0
+
+
+def test_every_candidate_includes_a_leg_at_the_requested_expiry():
+    """
+    Regression test for the exact reported bug: with a second (later)
+    expiry fetched only to support calendar structures, every returned
+    candidate must still include at least one leg at the requested
+    (primary) expiry -- the primary expiry must never be entirely
+    replaced by the additional expiries.
+    """
+    strikes = [90, 95, 100, 105, 110, 115, 120]
+    primary_expiry = near_expiry_ms(19)
+    other_expiry = near_expiry_ms(54)
+    primary_quotes = build_chain("BTCUSDT", 100.0, strikes, primary_expiry)
+    other_quotes = build_chain("BTCUSDT", 100.0, strikes, other_expiry)
+
+    candidates, _stats, _excl_stats = generate_candidates(
+        quotes_by_expiry={primary_expiry: primary_quotes, other_expiry: other_quotes},
+        underlying_price=100.0,
+        direction=Direction.NEUTRAL,
+        max_loss_budget=5000.0,
+        constraints=Constraints(max_legs=4, max_expiries=2),
+        primary_expiry_ms=primary_expiry,
+        max_nodes=8000,
+    )
+    assert candidates, "expected at least one candidate"
+    for c in candidates:
+        assert primary_expiry in c.expiries, (
+            f"candidate {c.structure_name} with expiries {c.expiries} has no leg at the "
+            f"requested expiry {primary_expiry}"
+        )

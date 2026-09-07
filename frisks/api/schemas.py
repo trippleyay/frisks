@@ -94,6 +94,12 @@ class StrategyResultSchema(BaseModel):
 class MetaSchema(BaseModel):
     candidates_evaluated: int
     candidates_excluded_illiquid: int
+    # Additive field (LLM-orchestration build): candidates that were
+    # structurally valid but excluded specifically for exceeding max_loss
+    # -- distinct from candidates_excluded_illiquid (excluded upstream in
+    # the data layer, before candidate generation even runs). Defaults to
+    # 0 so any client validating against the previous shape still passes.
+    candidates_excluded_budget: int = 0
     constraints_applied: Constraints
 
 
@@ -105,6 +111,13 @@ class StrategyResponseSchema(BaseModel):
     objective_used: str
     strategies: list[StrategyResultSchema]
     meta: MetaSchema
+    # Additive, optional (LLM-orchestration build): populated only when
+    # the feasibility-aware re-query triggers (see StrategyHunterService).
+    # Most well-budgeted requests leave this null -- that's the correct,
+    # expected case, not a missed feature. Never present without a real
+    # second engine run backing it; the LLM only narrates numbers both
+    # runs actually produced.
+    budget_note: str | None = None
 
 
 class NoStrategyResponseSchema(BaseModel):

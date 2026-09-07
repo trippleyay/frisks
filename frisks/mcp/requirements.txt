@@ -1,0 +1,23 @@
+# Dependency needed only by frisks/mcp/. Kept as a separate file rather
+# than appended to the project's root requirements.txt, per the original
+# MCP build's delivery instruction to not touch or resend any file
+# outside frisks/mcp/ (kept that way here for consistency).
+#
+# Install alongside the root requirements.txt:
+#   pip install -r requirements.txt -r frisks/mcp/requirements.txt
+#
+# PINNING DECISION (deployment build): FastMCP 4.0 became the current
+# stable release on 2026-09-05 (two days before this build), built on a
+# new MCP protocol revision (2026-07-28) with a rewritten underlying
+# `mcp` SDK. FastMCP's own maintainers describe 4.0 as stable and say
+# "most FastMCP 3 applications upgrade without code changes" -- but it is
+# extremely recent, this sandbox has no network access to actually
+# install and exercise it, and the API usage in frisks/mcp/server.py
+# (mcp.run(transport="streamable-http", ...), @mcp.custom_route(...))
+# was verified against 3.x-era documentation. For a deployment that has
+# to work correctly the first time it's judged, with no opportunity to
+# debug live, pinning to the last stable 3.x release (not the two-day-old
+# major version) is the more conservative, defensible choice. Revisit
+# once 4.0.x has had time to prove itself and someone can verify this
+# codebase against it directly.
+fastmcp==3.4.7

@@ -29,10 +29,14 @@ import httpx
 
 from frisks.config import LLMConfig
 from frisks.llm.prompts import (
+    BUDGET_NOTE_SYSTEM_PROMPT,
+    BUDGET_NOTE_USER_TEMPLATE,
     EXPLAIN_SYSTEM_PROMPT,
     EXPLAIN_USER_TEMPLATE,
     INTERPRET_SYSTEM_PROMPT,
     INTERPRET_USER_TEMPLATE,
+    SELF_CRITIQUE_SYSTEM_PROMPT,
+    SELF_CRITIQUE_USER_TEMPLATE,
 )
 
 logger = logging.getLogger(__name__)
@@ -150,3 +154,61 @@ class LLMClient:
         ]
         content, _provider = self._chat_completion(messages, temperature=0.3)
         return content.strip()
+
+    # -- LLM-as-orchestrator responsibilities (see frisks/service.py) -------
+    # Both live inside StrategyHunterService, not a separate NL-only
+    # endpoint, so they run on every request regardless of how it arrived.
+    # Same rule as everywhere: these only narrate/reason over numbers the
+    # engine already computed -- they never produce a number themselves.
+
+    def synthesize_budget_note(self, request_summary: str, results_json: str) -> str:
+        """
+        Feature 1 (feasibility-aware re-querying). `results_json` must
+        contain the top result from two REAL, separate engine runs (the
+        caller's original budget and a relaxed budget) -- this method
+        does not run the engine itself, it only narrates a comparison
+        the caller (frisks/service.py) already computed.
+        """
+        messages = [
+            {"role": "system", "content": BUDGET_NOTE_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": BUDGET_NOTE_USER_TEMPLATE.format(
+                    request_summary=request_summary, results_json=results_json
+                ),
+            },
+        ]
+        content, _provider = self._chat_completion(messages, temperature=0.3)
+        return content.strip()
+
+    def self_critique(self, request_summary: str, strategies_json: str) -> dict[str, str]:
+        """
+        Feature 2 (self-critique). Returns a dict mapping rank (as a
+        string, e.g. "1") to a short caveat sentence to append to that
+        strategy's rationale. A rank with no caveat needed is simply
+        absent from the returned dict -- callers should treat a missing
+        key as "nothing to add", not as an error.
+        """
+        messages = [
+            {"role": "system", "content": SELF_CRITIQUE_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": SELF_CRITIQUE_USER_TEMPLATE.format(
+                    request_summary=request_summary, strategies_json=strategies_json
+                ),
+            },
+        ]
+        content, provider = self._chat_completion(messages, temperature=0.0)
+        cleaned = _strip_json_fence(content)
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError as exc:
+            match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+            if not match:
+                raise LLMError(
+                    f"Provider {provider} did not return parseable JSON for self-critique: {content!r}"
+                ) from exc
+            parsed = json.loads(match.group(0))
+        if not isinstance(parsed, dict):
+            raise LLMError(f"self-critique response was not a JSON object: {parsed!r}")
+        return {str(k): str(v) for k, v in parsed.items()}

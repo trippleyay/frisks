@@ -194,22 +194,44 @@ def calendar_spreads(
 
 
 def generate_all_templates(
-    quotes_by_expiry: dict[int, list[MarketQuote]], max_expiries: int
+    quotes_by_expiry: dict[int, list[MarketQuote]], max_expiries: int, primary_expiry_ms: int
 ) -> list[Candidate]:
-    """Runs every single-expiry template against every liquid expiry, and
-    calendar templates across every pair of expiries if max_expiries allows."""
+    """
+    Runs every single-expiry template against the PRIMARY (requested)
+    expiry only, and calendar templates across (primary, other) expiry
+    pairs if max_expiries allows -- never between two non-primary
+    expiries.
+
+    BUG FIX: this previously looped single-expiry templates over *every*
+    expiry in `quotes_by_expiry`, including expiries fetched only to
+    supply the other leg of a calendar structure, and built calendar
+    candidates from every pair of expiries via
+    `itertools.combinations(expiries, 2)` regardless of whether either
+    expiry was the one the caller actually requested. That let, e.g., a
+    caller requesting 2026-09-25 receive a "call calendar spread" built
+    entirely from 2026-10-30 and 2026-11-27 contracts -- the requested
+    expiry was being treated as optional rather than required. Fixed:
+    the requested expiry is now a hard constraint. Single-expiry
+    templates only ever run against the primary expiry's quotes; calendar
+    templates only ever pair the primary expiry with one other fetched
+    expiry (never two non-primary expiries together) -- additional
+    expiries supply the *other* leg of a calendar/diagonal, they never
+    replace the requested one.
+    """
     out: list[Candidate] = []
-    for expiry_ms, quotes in quotes_by_expiry.items():
-        out.extend(vertical_spreads(quotes))
-        out.extend(straddles_and_strangles(quotes))
-        out.extend(butterflies(quotes))
-        out.extend(iron_condors(quotes))
-        out.extend(collars(quotes))
-        out.extend(ratio_spreads(quotes))
+    primary_quotes = quotes_by_expiry.get(primary_expiry_ms, [])
+    out.extend(vertical_spreads(primary_quotes))
+    out.extend(straddles_and_strangles(primary_quotes))
+    out.extend(butterflies(primary_quotes))
+    out.extend(iron_condors(primary_quotes))
+    out.extend(collars(primary_quotes))
+    out.extend(ratio_spreads(primary_quotes))
 
     if max_expiries >= 2:
-        expiries = sorted(quotes_by_expiry)
-        for near_ms, far_ms in itertools.combinations(expiries, 2):
+        for other_ms, other_quotes in quotes_by_expiry.items():
+            if other_ms == primary_expiry_ms:
+                continue
+            near_ms, far_ms = sorted((primary_expiry_ms, other_ms))
             out.extend(calendar_spreads(quotes_by_expiry[near_ms], quotes_by_expiry[far_ms]))
 
     return out

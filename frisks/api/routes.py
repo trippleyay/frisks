@@ -62,6 +62,7 @@ def search_strategies(
         objective_used=result.objective_used,
         strategies=result.strategies,
         meta=result.meta,
+        budget_note=result.budget_note,
     )
     return JSONResponse(status_code=200, content=json.loads(body.model_dump_json()))
 
