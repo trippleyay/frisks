@@ -2,7 +2,6 @@
 *.env
 .env.local
 .env.*.local
-frisks/data/
 
 __pycache__/
 *.py[cod]
