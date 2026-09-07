@@ -1,43 +1,7 @@
-# Render Blueprint for Frisks. Deploy via Render's "New Blueprint
-# Instance" flow, pointed at this repo -- see the README's "Deployment
-# runbook for Trip" section for the exact click-through steps.
-#
-# ---------------------------------------------------------------------
-# FLAGGED, NOT GUESSED CONFIDENTLY (per the build prompt): the field
-# that selects a native (non-Docker) runtime appears under two different
-# names across Render's own current documentation and real-world
-# examples -- `runtime: python` in Render's own "Advanced Blueprint
-# Patterns" tutorial page, and `env: python` (or `env: node`, `env:
-# ruby`, etc.) in numerous current community render.yaml files and in
-# Render's own older docs snippets. I could not fully resolve, without
-# live access to validate a Blueprint, whether both are accepted
-# aliases or whether one is stale. Used `runtime: python` below as the
-# more likely current canonical name. If the Blueprint fails to
-# validate/parse on Render's side with an error naming this field,
-# change `runtime: python` to `env: python` on both services below --
-# that is the one-line fix, and Render's own error message when you hit
-# "Apply" will say exactly which field it doesn't recognize.
-# ---------------------------------------------------------------------
-#
-# Region is Singapore, explicitly, on BOTH services -- non-negotiable.
-# Binance's Options API has returned HTTP 451 (geo-restricted) against a
-# US-based IP during local testing; Singapore is the confirmed-clear
-# Render region. Do not change this to oregon/ohio/virginia/frankfurt.
-#
-# Predictable public URLs: Render serves a web service without a custom
-# domain at https://<name>.onrender.com, where <name> is this file's
-# `name:` field (confirmed in Render's own web-services docs). The
-# FRISKS_PEER_HEALTH_URL values below are built directly from the two
-# service names chosen here (frisks-api, frisks-mcp) for exactly this
-# reason. If you rename either service in the dashboard after the first
-# deploy, update the other service's FRISKS_PEER_HEALTH_URL to match, or
-# the self-ping's peer leg will silently 404/fail (logged as a warning,
-# never fatal -- see frisks/selfping.py -- but it stops helping).
-
-# Note: `PORT` is deliberately NOT declared in envVars below -- Render
-# injects it automatically for every web service (defaulting to 10000)
-# and both frisks/main.py and frisks/mcp/__main__.py already read it
-# correctly (see those files) to bind their HTTP server.
+# Render Blueprint for Frisks -- see the README's deployment runbook.
+# region: singapore is required (Binance's Options API geo-blocks other regions).
+# FRISKS_PEER_HEALTH_URL values assume the service names below; update on rename.
+# PORT is injected by Render automatically; do not declare it in envVars.
 
 services:
   - type: web
@@ -58,13 +22,7 @@ services:
         value: "false"
       - key: FRISKS_PEER_HEALTH_URL
         value: https://frisks-mcp.onrender.com/health
-      # Secrets -- never committed, never given a `value:` here. Render
-      # prompts for these during the Blueprint creation flow when it
-      # sees sync: false, and they're editable any time after under the
-      # service's own Environment tab. Both are optional: /v1/strategies
-      # works with neither configured (see README) -- only
-      # /v1/strategies/interpret, /search-text, /explain, and the two
-      # new orchestrator LLM calls need a provider configured.
+      # Secrets: prompted for at Blueprint creation (sync: false), optional.
       - key: GROQ_API_KEY
         sync: false
       - key: DEEPSEEK_API_KEY
