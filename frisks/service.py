@@ -243,6 +243,7 @@ class StrategyHunterService:
             risk_free_rate=risk_free_rate,
             grid_points=self._config.engine.distribution_grid_points,
             grid_sigmas=self._config.engine.distribution_grid_sigmas,
+            max_expensive_checks=self._config.engine.max_expensive_checks,
         )
 
         if not candidates:

@@ -119,3 +119,57 @@ def test_every_candidate_includes_a_leg_at_the_requested_expiry():
             f"candidate {c.structure_name} with expiries {c.expiries} has no leg at the "
             f"requested expiry {primary_expiry}"
         )
+
+
+def test_multi_expiry_expensive_check_is_capped(monkeypatch):
+    """
+    Regression test for the latency fix (bug fix #5): given more
+    multi-expiry survivors than `max_expensive_checks`, only the top N by
+    cheap intrinsic worst-case loss may reach the expensive payoff-model
+    check. We spy on build_payoff_model to count real calls; with a cap of
+    2, at most 2 calls may happen, and with a huge cap the same input
+    produces many more calls -- proving the cap is what bounds it, not an
+    artifact of the fixture producing few candidates.
+    """
+    import frisks.engine.generator as generator_module
+    from frisks.engine.payoff import build_payoff_model as real_build_payoff_model
+
+    strikes = [90, 95, 100, 105, 110, 115, 120]
+    primary_expiry = near_expiry_ms(19)
+    other_expiry = near_expiry_ms(54)
+    quotes_by_expiry = {
+        primary_expiry: build_chain("BTCUSDT", 100.0, strikes, primary_expiry),
+        other_expiry: build_chain("BTCUSDT", 100.0, strikes, other_expiry),
+    }
+    kwargs = dict(
+        quotes_by_expiry=quotes_by_expiry,
+        underlying_price=100.0,
+        direction=Direction.NEUTRAL,
+        max_loss_budget=5000.0,
+        constraints=Constraints(max_legs=4, max_expiries=2),
+        primary_expiry_ms=primary_expiry,
+        risk_free_rate=0.0,
+        grid_points=200,
+        grid_sigmas=6.0,
+        max_nodes=8000,
+    )
+    call_count = {"n": 0}
+
+    def spy(candidate, underlying_price, risk_free_rate, grid_points, grid_sigmas):
+        call_count["n"] += 1
+        return real_build_payoff_model(
+            candidate, underlying_price, risk_free_rate, grid_points, grid_sigmas
+        )
+
+    monkeypatch.setattr(generator_module, "build_payoff_model", spy)
+
+    # Capped: at most `max_expensive_checks` expensive checks.
+    call_count["n"] = 0
+    generate_candidates(**kwargs, max_expensive_checks=2)
+    assert call_count["n"] <= 2, f"expensive check ran {call_count['n']} times, expected <= 2"
+
+    # Sanity: the same input with a huge cap produces many more calls, so the
+    # cap above is what actually excluded them (test is not vacuous).
+    call_count["n"] = 0
+    generate_candidates(**kwargs, max_expensive_checks=100_000)
+    assert call_count["n"] > 300, f"expected far more than 2 expensive checks uncapped, got {call_count['n']}"

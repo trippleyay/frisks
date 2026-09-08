@@ -91,6 +91,25 @@ BUG FIXES (post-MVP):
    Same-expiry candidates keep using the cheap check, since it is exact
    there, not an approximation -- no reason to pay for a distribution
    build when intrinsic value already *is* the true settlement value.
+5. (Latency) Fix #4 made every multi-expiry candidate go through the
+   expensive payoff-model check for correctness reasons. That is correct
+   and must not be reverted or weakened -- but on a live production
+   request (BTC, bullish, max_loss=5000 on Render) the ~9,400 raw
+   multi-expiry candidates meant running `build_payoff_model` ~9,400
+   times, blowing the response out to ~3.5 minutes. A cheap pre-reject
+   did not help enough because most of those candidates *look* like
+   reasonable spreads on the cheap intrinsic check, so they still fell
+   through to the expensive path. Fixed without weakening fix #4: the
+   multi-expiry survivors of the cheap pre-reject are now ranked by cheap
+   intrinsic worst-case loss ascending, and only the top
+   `max_expensive_checks` (env `FRISKS_MAX_EXPENSIVE_CHECKS`, default 300)
+   actually get the real payoff-model gate. Everything beyond the cap is
+   dropped from consideration entirely (counted as budget-excluded) --
+   never silently accepted. Any candidate that does reach the expensive
+   check is still validated exactly as before, so the fix #4 guarantee is
+   preserved for every candidate that survives to that gate. Same-expiry
+   candidates are completely unaffected (they never reach the expensive
+   path).
 """
 from __future__ import annotations
 
@@ -392,6 +411,7 @@ def generate_candidates(
     grid_points: int,
     grid_sigmas: float,
     max_nodes: int = 15000,
+    max_expensive_checks: int = 300,
 ) -> tuple[list[Candidate], GenerationResult, ExclusionStats]:
     """
     Merge template-generated and free-form-searched candidates. Templates
@@ -404,6 +424,14 @@ def generate_candidates(
     downstream in scoring) because multi-expiry candidates require the
     real payoff model to compute a correct worst-case loss -- see bug fix
     #4 in the module docstring.
+
+    `max_expensive_checks` caps how many multi-expiry candidates get the
+    real payoff-model budget check (see bug fix #5). Multi-expiry survivors
+    of the cheap pre-reject are ranked by cheap intrinsic worst-case loss
+    ascending and only the top `max_expensive_checks` get the expensive
+    check; the rest are dropped from consideration entirely. Same-expiry
+    candidates are unaffected -- their cheap intrinsic check is exact, so
+    they never reach the expensive path.
     """
     template_candidates = generate_all_templates(quotes_by_expiry, constraints.max_expiries, primary_expiry_ms)
     bnb_result = branch_and_bound_search(
@@ -413,6 +441,11 @@ def generate_candidates(
     valid: list[Candidate] = []
     seen: set[tuple] = set()
     stats = ExclusionStats()
+    # Multi-expiry candidates that passed every cheap check but still need
+    # the real payoff-model budget gate. Kept aside, ranked cheaply, and
+    # only the top `max_expensive_checks` make it to the expensive check;
+    # the rest are dropped outright (see bug fix #5 in the module docstring).
+    multi_expiry_pending: list[tuple[float, Candidate]] = []
 
     def sig(c: Candidate) -> tuple:
         return tuple(sorted((leg.symbol, leg.side.value, leg.quantity) for leg in c.legs))
@@ -430,26 +463,8 @@ def generate_candidates(
             continue
         if _net_call_slope(candidate.legs) < 0:
             continue  # unbounded upside risk, never a valid completed candidate
-
-        if len(candidate.expiries) > 1:
-            # Multi-expiry: the cheap intrinsic-only bound is WRONG here
-            # (see bug fix #4) -- use the real payoff model, the same
-            # repricing used for scoring, as the authoritative gate.
-            model = build_payoff_model(candidate, underlying_price, risk_free_rate, grid_points, grid_sigmas)
-            worst = model.max_loss()
-        else:
-            # Same-expiry: intrinsic value at settlement IS the true
-            # value, so the cheap check is exact, not an approximation --
-            # no reason to pay for a distribution build here.
-            worst = _bounded_worst_case_loss(candidate.legs, candidate.entry_cost)
-            if worst is None:
-                stats.budget_excluded += 1
-                continue
-
-        if worst > max_loss_budget:
-            stats.budget_excluded += 1
-            continue
         if candidate.entry_cost > max_loss_budget:
+            # Budget prune (rule 1) -- applies regardless of expiry count.
             stats.budget_excluded += 1
             continue
         if _direction_contradicts(candidate, direction):
@@ -458,11 +473,66 @@ def generate_candidates(
         if is_box_spread_shaped(candidate):
             stats.box_spread_excluded += 1
             continue
+        # De-duplicate BEFORE the expensive (multi-expiry) check, so we never
+        # pay for a payoff-model build on a candidate whose exact signature
+        # was already accepted.
         s = sig(candidate)
         if s in seen:
             continue
         seen.add(s)
-        valid.append(candidate)
+
+        if len(candidate.expiries) > 1:
+            # Multi-expiry: the cheap intrinsic-only bound is a *pre-filter*
+            # used to (a) reject obvious budget-busters and (b) rank the
+            # remaining survivors so only the most promising are worth the
+            # expensive check. It is NOT the authoritative value here -- the
+            # cheap check can understate real worst-case loss for net-credit
+            # multi-expiry structures (see bug fix #4), which is exactly why
+            # the survivors must still go through the real payoff model.
+            cheap_worst = _bounded_worst_case_loss(candidate.legs, candidate.entry_cost)
+            if cheap_worst is None or cheap_worst > max_loss_budget:
+                stats.budget_excluded += 1
+                continue
+            multi_expiry_pending.append((cheap_worst, candidate))
+        else:
+            # Same-expiry: intrinsic value at settlement IS the true
+            # value, so the cheap check is exact, not an approximation --
+            # no reason to pay for a distribution build here.
+            worst = _bounded_worst_case_loss(candidate.legs, candidate.entry_cost)
+            if worst is None:
+                stats.budget_excluded += 1
+                continue
+            if worst > max_loss_budget:
+                stats.budget_excluded += 1
+                continue
+            valid.append(candidate)
+
+    # Multi-expiry budget gate, bounded by `max_expensive_checks`.
+    # Rank survivors by cheap intrinsic worst-case loss ascending (most
+    # promising / safest-looking first), take only the top cap, and run the
+    # REAL payoff-model check on just those. Everything beyond the cap is
+    # dropped from consideration entirely (counted as budget-excluded) --
+    # it is never silently accepted. Any candidate that does get checked is
+    # validated exactly as before, so the bug-fix #4 correctness guarantee
+    # is preserved for every candidate that survives to this gate.
+    if multi_expiry_pending:
+        multi_expiry_pending.sort(key=lambda pair: pair[0])  # ascending cheap worst-case loss
+        checked = multi_expiry_pending[:max_expensive_checks]
+        dropped = len(multi_expiry_pending) - len(checked)
+        if dropped > 0:
+            stats.budget_excluded += dropped
+            logger.info(
+                "generate_candidates: multi-expiry cap (%s) dropped %s lower-priority candidates "
+                "from the expensive payoff-model check",
+                max_expensive_checks, dropped,
+            )
+        for _cheap_worst, candidate in checked:
+            model = build_payoff_model(candidate, underlying_price, risk_free_rate, grid_points, grid_sigmas)
+            real_worst = model.max_loss()
+            if real_worst > max_loss_budget:
+                stats.budget_excluded += 1
+                continue
+            valid.append(candidate)
 
     if stats.box_spread_excluded:
         logger.info("generate_candidates: excluded %s box-spread-shaped candidates", stats.box_spread_excluded)

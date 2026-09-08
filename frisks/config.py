@@ -160,6 +160,19 @@ class EngineConfig:
     # How many standard deviations of log-return to span when building the
     # terminal price grid (covers >99.99% of a lognormal-ish distribution).
     distribution_grid_sigmas: float = field(default_factory=lambda: _env_float("FRISKS_DIST_GRID_SIGMAS", 6.0))
+    # Latency guard for multi-expiry candidate evaluation (see
+    # generator.py's module docstring, bug fix #5). Multi-expiry candidates
+    # require the real payoff model (`build_payoff_model(...).max_loss()`) to
+    # compute a correct worst-case loss, which is expensive per candidate.
+    # Before this cap, every multi-expiry survivor of the cheap pre-reject
+    # got the full expensive check -- on a live BTC request that was ~9,400
+    # candidates, blowing the response out to minutes. This caps how many of
+    # the most promising survivors (cheap intrinsic worst-case loss
+    # ascending) actually get the expensive check; everything beyond the cap
+    # is dropped from consideration entirely. Adjustable at deploy time
+    # without a code change: raise if the cap is dropping good candidates too
+    # aggressively, lower if a request is still too slow.
+    max_expensive_checks: int = field(default_factory=lambda: _env_int("FRISKS_MAX_EXPENSIVE_CHECKS", 300))
 
 
 def _env_tuple(name: str, default: tuple) -> tuple:
