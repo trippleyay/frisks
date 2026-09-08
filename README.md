@@ -152,6 +152,8 @@ The expiry date in these examples should be changed to whatever BTC or ETH expir
 
 The MCP server and API are free to use today. Machine-to-machine payment through Binance's B402 may be introduced in the future once partner access is available, so usage could carry a small cost down the line.
 
+Note: responses typically take 15 to 90 seconds depending on the complexity of the search and market conditions, since Frisks queries live options data and reasons over the results rather than returning a cached or instant answer. This is expected, not an error.
+
 ## Project Structure
 
 ```text
