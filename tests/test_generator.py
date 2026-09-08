@@ -37,6 +37,9 @@ def test_generate_candidates_respects_max_loss_budget():
         max_loss_budget=50.0,
         constraints=Constraints(max_legs=4, max_expiries=2),
         primary_expiry_ms=expiry,
+        risk_free_rate=0.0,
+        grid_points=200,
+        grid_sigmas=6.0,
         max_nodes=5000,
     )
     for c in candidates:
@@ -52,6 +55,9 @@ def test_generate_candidates_respects_max_legs():
         max_loss_budget=10_000.0,
         constraints=Constraints(max_legs=2, max_expiries=1),
         primary_expiry_ms=expiry,
+        risk_free_rate=0.0,
+        grid_points=200,
+        grid_sigmas=6.0,
         max_nodes=5000,
     )
     assert candidates
@@ -69,6 +75,9 @@ def test_no_candidate_has_redundant_inverse_legs():
         max_loss_budget=10_000.0,
         constraints=Constraints(max_legs=4, max_expiries=2),
         primary_expiry_ms=expiry,
+        risk_free_rate=0.0,
+        grid_points=200,
+        grid_sigmas=6.0,
         max_nodes=5000,
     )
     for c in candidates:
@@ -99,6 +108,9 @@ def test_every_candidate_includes_a_leg_at_the_requested_expiry():
         max_loss_budget=5000.0,
         constraints=Constraints(max_legs=4, max_expiries=2),
         primary_expiry_ms=primary_expiry,
+        risk_free_rate=0.0,
+        grid_points=200,
+        grid_sigmas=6.0,
         max_nodes=8000,
     )
     assert candidates, "expected at least one candidate"

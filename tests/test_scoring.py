@@ -17,6 +17,9 @@ def _setup(objective: Objective, target_cost=None):
         max_loss_budget=2000.0,
         constraints=Constraints(max_legs=4, max_expiries=1),
         primary_expiry_ms=expiry,
+        risk_free_rate=0.0,
+        grid_points=200,
+        grid_sigmas=6.0,
         max_nodes=6000,
     )
     payoff_models = [(c, build_payoff_model(c, 100.0, 0.0, 200, 6.0)) for c in candidates]

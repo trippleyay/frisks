@@ -226,6 +226,13 @@ class StrategyHunterService:
             max_legs=request.constraints.max_legs, max_expiries=request.constraints.max_expiries
         )
 
+        # Computed BEFORE generate_candidates (moved from after, see bug
+        # fix below): multi-expiry candidates need the real payoff model
+        # -- and therefore a risk-free rate -- to compute a correct
+        # worst-case loss during generation itself, not just at scoring
+        # time.
+        risk_free_rate = self._representative_risk_free_rate(snapshot)
+
         candidates, _gen_stats, exclusion_stats = generate_candidates(
             quotes_by_expiry=quotes_by_expiry,
             underlying_price=underlying_price,
@@ -233,6 +240,9 @@ class StrategyHunterService:
             max_loss_budget=request.max_loss,
             constraints=engine_constraints,
             primary_expiry_ms=snapshot.expiry_ms,
+            risk_free_rate=risk_free_rate,
+            grid_points=self._config.engine.distribution_grid_points,
+            grid_sigmas=self._config.engine.distribution_grid_sigmas,
         )
 
         if not candidates:
@@ -245,7 +255,6 @@ class StrategyHunterService:
                 ),
             )
 
-        risk_free_rate = self._representative_risk_free_rate(snapshot)
         payoff_models = [
             (
                 c,
@@ -272,6 +281,40 @@ class StrategyHunterService:
         strategies_payload = [
             self._strategy_to_dict(rank_idx + 1, scored) for rank_idx, scored in enumerate(ranked)
         ]
+
+        # Defense-in-depth constraint enforcement (independent of the
+        # generator-level fix above, and independent of self-critique --
+        # per explicit instruction, self-critique must never be treated
+        # as a backstop for constraint enforcement, only as commentary on
+        # an already-valid result). Any strategy whose real, already-
+        # computed max_loss exceeds the caller's stated budget is
+        # EXCLUDED here, never merely annotated -- a response must never
+        # present a strategy that violates the user's stated risk limit
+        # as a ranked pick, let alone the top one. A small epsilon
+        # absorbs the 2-decimal rounding already applied to max_loss in
+        # _strategy_to_dict; it is not a tolerance for real violations.
+        _epsilon = 0.01
+        before_count = len(strategies_payload)
+        strategies_payload = [s for s in strategies_payload if s["max_loss"] <= request.max_loss + _epsilon]
+        if len(strategies_payload) < before_count:
+            logger.warning(
+                "Defense-in-depth filter excluded %s strategy(ies) whose real max_loss exceeded the "
+                "requested budget of %s -- this should not happen if generate_candidates' own budget "
+                "enforcement is correct; investigate as a bug if this fires.",
+                before_count - len(strategies_payload), request.max_loss,
+            )
+            for i, s in enumerate(strategies_payload, start=1):
+                s["rank"] = i
+
+        if not strategies_payload:
+            return NoValidStrategiesResult(
+                request_id="",
+                asset=request.asset,
+                message=(
+                    f"No liquid candidates satisfied max_loss={request.max_loss} with "
+                    f"direction={request.direction.value} for the given expiries."
+                ),
+            )
 
         meta = {
             "candidates_evaluated": len(candidates),

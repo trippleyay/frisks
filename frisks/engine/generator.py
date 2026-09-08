@@ -69,6 +69,28 @@ BUG FIXES (post-MVP):
    search prunes any branch that would exhaust its expiry budget without
    the primary expiry included) and with a hard filter as a final
    safety net in `generate_candidates`.
+4. `_bounded_worst_case_loss` computes worst-case loss using pure
+   intrinsic value for every leg, which is EXACT for same-expiry
+   candidates (that genuinely is the settlement value) but WRONG for
+   multi-expiry candidates: the far leg is still alive at the near
+   expiry, so its true value there is its live option value (time value
+   included), not its intrinsic value. For a calendar/diagonal built as
+   a net credit (e.g. a "reverse calendar spread"), this made the cheap
+   check severely UNDERESTIMATE the short far leg's real liability
+   (often near-zero intrinsic value when deep OTM, while its actual
+   option value -- what you'd really have to pay to close it -- can be
+   substantial), letting candidates whose real worst-case loss was many
+   times over max_loss slip through the final budget gate. Confirmed via
+   FRISKS_DEBUG_LLM testing: every violating result was a net-credit,
+   multi-expiry structure; every correctly-bounded result was net-debit
+   (same-expiry or otherwise unaffected by this gap). Fixed:
+   `generate_candidates`'s final validity gate now computes the REAL
+   worst-case loss for any multi-expiry candidate via the actual payoff
+   model (frisks.engine.payoff.build_payoff_model, the same repricing
+   used for scoring), not the cheap intrinsic-only approximation.
+   Same-expiry candidates keep using the cheap check, since it is exact
+   there, not an approximation -- no reason to pay for a distribution
+   build when intrinsic value already *is* the true settlement value.
 """
 from __future__ import annotations
 
@@ -78,6 +100,7 @@ from dataclasses import dataclass
 
 from frisks.data.models import MarketQuote
 from frisks.engine.models import Candidate, Constraints, Direction, Leg, OrderSide
+from frisks.engine.payoff import build_payoff_model
 from frisks.engine.templates import generate_all_templates
 
 logger = logging.getLogger(__name__)
@@ -365,6 +388,9 @@ def generate_candidates(
     max_loss_budget: float,
     constraints: Constraints,
     primary_expiry_ms: int,
+    risk_free_rate: float,
+    grid_points: int,
+    grid_sigmas: float,
     max_nodes: int = 15000,
 ) -> tuple[list[Candidate], GenerationResult, ExclusionStats]:
     """
@@ -373,6 +399,11 @@ def generate_candidates(
     shape, and requested-expiry checks so a template that happens to bust
     the user's constraints (or omit the expiry they actually asked for)
     doesn't leak through untested.
+
+    `risk_free_rate`/`grid_points`/`grid_sigmas` are needed here (not just
+    downstream in scoring) because multi-expiry candidates require the
+    real payoff model to compute a correct worst-case loss -- see bug fix
+    #4 in the module docstring.
     """
     template_candidates = generate_all_templates(quotes_by_expiry, constraints.max_expiries, primary_expiry_ms)
     bnb_result = branch_and_bound_search(
@@ -399,8 +430,23 @@ def generate_candidates(
             continue
         if _net_call_slope(candidate.legs) < 0:
             continue  # unbounded upside risk, never a valid completed candidate
-        worst = _bounded_worst_case_loss(candidate.legs, candidate.entry_cost)
-        if worst is None or worst > max_loss_budget:
+
+        if len(candidate.expiries) > 1:
+            # Multi-expiry: the cheap intrinsic-only bound is WRONG here
+            # (see bug fix #4) -- use the real payoff model, the same
+            # repricing used for scoring, as the authoritative gate.
+            model = build_payoff_model(candidate, underlying_price, risk_free_rate, grid_points, grid_sigmas)
+            worst = model.max_loss()
+        else:
+            # Same-expiry: intrinsic value at settlement IS the true
+            # value, so the cheap check is exact, not an approximation --
+            # no reason to pay for a distribution build here.
+            worst = _bounded_worst_case_loss(candidate.legs, candidate.entry_cost)
+            if worst is None:
+                stats.budget_excluded += 1
+                continue
+
+        if worst > max_loss_budget:
             stats.budget_excluded += 1
             continue
         if candidate.entry_cost > max_loss_budget:
